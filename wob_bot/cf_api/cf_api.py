@@ -6,8 +6,8 @@ import requests
 import pandas as pd
 
 
-def make_request(url: str):
-    r = requests.get(url)
+def make_request(api_endpoint: str):
+    r = requests.get(f"https://codeforces.com/api/{api_endpoint}")
     r.raise_for_status()
     return r.json()["result"]
 
@@ -97,9 +97,7 @@ def get_contest_standings(
         )
         return participant_info, problem_results
 
-    json = make_request(
-        f"https://codeforces.com/api/contest.standings?contestId={contest_id}"
-    )
+    json = make_request(f"contest.standings?contestId={contest_id}")
 
     contest = json["contest"]
     problems = pd.DataFrame(json["problems"]).rename(columns={"index": "label"})
@@ -114,10 +112,46 @@ def get_contest_standings(
     return contest, problems, participants, problem_results
 
 
-# Test output
-if __name__ == '__main__':
+"""
+Example:
+print(get_rating_changes(2033))
+
+                handle   rank  ratingUpdateTimeSeconds  oldRating  newRating
+0             ponjuice      1               1729788600       1422       1907
+1           AIinLoh420      2               1729788600          0        877
+2              tktkqw9      3               1729788600        754       1407
+3         baoziiii1224      4               1729788600       1246       1727
+4        god_bless_you      5               1729788600        841       1424
+...                ...    ...                      ...        ...        ...
+22427         rohith_5  21718               1729788600        579        705
+22428  Meghamala_Pilli  21718               1729788600        590        715
+22429         Abdo_S_S  21718               1729788600       1084        964
+22430   KLU_2200030987  21718               1729788600        358        574
+22431           Mr_mit  21718               1729788600          0        351
+
+[22432 rows x 5 columns]
+"""
+
+
+def get_rating_changes(contest_id: int) -> pd.DataFrame:
+    json = make_request(f"contest.ratingChanges?contestId={contest_id}")
+    rating_changes = pd.DataFrame(json).drop(columns=["contestId", "contestName"])
+    return rating_changes
+
+
+# Functions to confirm that the output looks right.
+def test_contest_standings():
     contest, problems, participants, problem_results = get_contest_standings(2033)
     print(contest)
     print(problems)
     print(participants)
     print(problem_results)
+
+
+def test_rating_changes():
+    rating_changes = get_rating_changes(2033)
+    print(rating_changes)
+
+
+if __name__ == "__main__":
+    test_rating_changes()
