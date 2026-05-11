@@ -32,7 +32,7 @@ def get_contest_standings(
     }
 
     PROBLEMS:
-    contestId label                                   name         type  rating                                               tags
+       contestId label                                   name         type  rating                                               tags
     0       2033     A                    Sakurako and Kosuke  PROGRAMMING     800    [constructive algorithms, implementation, math]
     1       2033     B                     Sakurako and Water  PROGRAMMING     900     [brute force, constructive algorithms, greedy]
     2       2033     C                  Sakurako's Field Trip  PROGRAMMING    1400                         [dp, greedy, two pointers]
@@ -42,7 +42,7 @@ def get_contest_standings(
     6       2033     G                    Sakurako and Chefir  PROGRAMMING    2200  [data structures, dfs and similar, dp, greedy,...
 
     PARTICIPANTS:
-                    handle   rank  points  penalty  successfulHackCount  unsuccessfulHackCount
+                     handle   rank  points  penalty  successfulHackCount  unsuccessfulHackCount
     0                  Valj      1     7.0      287                    0                      0
     1              MR.Shiva      2     7.0      300                    0                      0
     2           Salty_jelly      3     7.0      363                    0                      0
@@ -57,7 +57,7 @@ def get_contest_standings(
     [13938 rows x 6 columns]
 
     PROBLEM_RESULTS:
-        problem_index       handle  points  rejectedAttemptCount   type  bestSubmissionTimeSeconds
+           problem_index       handle  points  rejectedAttemptCount   type  bestSubmissionTimeSeconds
     0                  0         Valj     1.0                     0  FINAL                      186.0
     1                  1         Valj     1.0                     0  FINAL                      289.0
     2                  2         Valj     1.0                     1  FINAL                     1346.0
@@ -148,4 +148,5 @@ def test_rating_changes():
 
 
 if __name__ == "__main__":
+    # test_contest_standings()
     test_rating_changes()
