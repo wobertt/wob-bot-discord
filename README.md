@@ -1,3 +1,5 @@
+# TODO: change this file to something not so llm'ed
+
 # WobBot
 
 A small Python Discord bot that responds to slash commands with Plotly charts.
