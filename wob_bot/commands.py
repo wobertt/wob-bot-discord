@@ -41,6 +41,7 @@ def register_commands(bot: commands.Bot) -> None:
                 f"Error: Failed to calculate problem ratings for contest_id={contest_id}",
             )
 
+"""
     @bot.tree.command(
         name="solves",
         description="Show the number of solves for a contest problem.",
@@ -82,3 +83,4 @@ def register_commands(bot: commands.Bot) -> None:
             await interaction.followup.send(
                 "Sorry, I couldn't look up solves for that problem. Please try again in a minute."
             )
+"""
