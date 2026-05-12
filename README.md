@@ -58,9 +58,3 @@ plotly_get_chrome
 3. In the wrapper, defer the interaction, call your plotting function, and pass the figure to `send_plotly_figure`.
 
 For text commands, follow the `/solves` pattern: write a pure lookup function, then add a slash-command wrapper that defers, calls the function, and sends a text response.
-
-## Test
-
-```bash
-pytest
-```
