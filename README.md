@@ -37,10 +37,6 @@ python -m wob_bot
 Invite the bot with the `bot` and `applications.commands` OAuth2 scopes. The bot needs permission to send messages and attach files.
 
 
-## TLS Certificates
-
-The bot configures `discord.py` to use Certifi's trusted CA bundle. This avoids a common macOS `CERTIFICATE_VERIFY_FAILED` issue with Python.org installs while keeping normal HTTPS certificate verification enabled.
-
 ## Plotly Image Export
 
 Plotly uses Kaleido to export figures to PNG. Kaleido v1 needs a compatible Chrome or Chromium installation. If rendering fails because Chrome is missing, install Chrome locally or run:
@@ -49,10 +45,11 @@ Plotly uses Kaleido to export figures to PNG. Kaleido v1 needs a compatible Chro
 plotly_get_chrome
 ```
 
-## Add A New Chart Command
+## Adding New Commands
 
-1. Add a pure function in `wob_bot/charts.py` that returns a Plotly `Figure`.
+1. Create a new file in the `wob_bot` directory that returns text or a Plotly `Figure`.
 2. Add a slash-command wrapper in `wob_bot/commands.py`.
 3. In the wrapper, defer the interaction, call your plotting function, and pass the figure to `send_plotly_figure`.
 
-For text commands, follow the `/solves` pattern: write a pure lookup function, then add a slash-command wrapper that defers, calls the function, and sends a text response.
+In `wob_bot/commands.py`, see `problemratings_command` for an example of a text command
+and `solvetimes` for an example of a Figure command.
