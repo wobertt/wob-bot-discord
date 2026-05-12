@@ -28,7 +28,9 @@ def main() -> None:
 
     token = os.getenv("DISCORD_TOKEN")
     if not token:
-        raise RuntimeError("DISCORD_TOKEN is required in your environment or .env file.")
+        raise RuntimeError(
+            "DISCORD_TOKEN is required in your environment or .env file."
+        )
 
     asyncio.run(run_bot(token))
 

@@ -35,7 +35,9 @@ class WobBot(commands.Bot):
             guild = self._guild_object_from_env(guild_id)
             self.tree.copy_global_to(guild=guild)
             synced = await self.tree.sync(guild=guild)
-            logger.info("Synced %s slash command(s) to guild %s.", len(synced), guild_id)
+            logger.info(
+                "Synced %s slash command(s) to guild %s.", len(synced), guild_id
+            )
             return
 
         synced = await self.tree.sync()
@@ -57,4 +59,6 @@ class WobBot(commands.Bot):
         try:
             return discord.Object(id=int(guild_id))
         except ValueError as exc:
-            raise RuntimeError("DISCORD_GUILD_ID must be an integer Discord server ID.") from exc
+            raise RuntimeError(
+                "DISCORD_GUILD_ID must be an integer Discord server ID."
+            ) from exc

@@ -5,6 +5,7 @@ A small Python Discord bot for interactions with the Codeforces API.
 ## Features
 
 - `/probrat [contest_id]`: Obtain estimated problem ratings for a past contest. Rating changes must have been released.
+- `/solvetimes [contest_id] [problem_id]`: Plot solve times by rating for a specified problem.
 
 ## Setup (untested, generated with codex)
 
@@ -35,9 +36,6 @@ python -m wob_bot
 
 Invite the bot with the `bot` and `applications.commands` OAuth2 scopes. The bot needs permission to send messages and attach files.
 
-Run `/problemratings 2033` in your server. The current implementation returns a placeholder chart from `wob_bot.charts.problemratings`.
-
-Run `/solves contest-id:2033 problem-name:A` to get a placeholder solve count from `wob_bot.solves.get_problem_solves`.
 
 ## TLS Certificates
 

@@ -24,7 +24,7 @@ def problemratings(contest_id: int) -> str:
 
     def prettify_df(df: pd.DataFrame) -> str:
         """Make the DataFrame output nice."""
-        df = df.rename_axis('problem')
+        df = df.rename_axis("problem")
         return f"```{tabulate(df, headers=[df.index.name] + list(df.columns))}```"
 
     def calc_problem_rating(user_ratings: pd.Series, solve_count: int) -> int:
