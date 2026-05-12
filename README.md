@@ -1,10 +1,12 @@
-# TODO: change this file to something not so llm'ed
-
 # WobBot
 
-A small Python Discord bot that responds to slash commands with Plotly charts.
+A small Python Discord bot for interactions with the Codeforces API.
 
-## Setup
+## Features
+
+- `/probrat [contest_id]`: Obtain estimated problem ratings for a past contest. Rating changes must have been released.
+
+## Setup (untested, generated with codex)
 
 Create a virtual environment, install dependencies, and add your server ID to `.env`:
 
