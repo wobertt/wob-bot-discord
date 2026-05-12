@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from .charts import problemratings
+from .problemratings import problemratings
 from .plotting import send_plotly_figure
 from .solves import get_problem_solves
 
@@ -20,24 +20,25 @@ def register_commands(bot: commands.Bot) -> None:
     """Register slash commands on the bot's command tree."""
 
     @bot.tree.command(
-        name="problemratings",
-        description="Show a placeholder problem rating distribution chart.",
+        name="probrat",
+        description="Show predicted problem ratings for a contest.",
     )
-    @app_commands.describe(id="Problem set, contest, or resource ID to chart.")
-    async def problemratings_command(interaction: discord.Interaction, id: int) -> None:
+    @app_commands.describe(contest_id="Contest ID.")
+    async def problemratings_command(
+        interaction: discord.Interaction, contest_id: int
+    ) -> None:
         await interaction.response.defer(thinking=True)
 
         try:
-            fig = await asyncio.to_thread(problemratings, id)
-            await send_plotly_figure(
-                interaction,
-                fig,
-                filename=f"problemratings-{id}.png",
-            )
+            res = await asyncio.to_thread(problemratings, contest_id)
+            await interaction.followup.send(res)
+
         except Exception:
-            logger.exception("Failed to build problemratings chart for id=%s.", id)
+            logger.exception(
+                "Failed to calculate problem ratings for contest_id=%s.", contest_id
+            )
             await interaction.followup.send(
-                "Sorry, I couldn't build that chart. Please try again in a minute."
+                f"Error: Failed to calculate problem ratings for contest_id={contest_id}",
             )
 
     @bot.tree.command(
@@ -57,7 +58,18 @@ def register_commands(bot: commands.Bot) -> None:
         await interaction.response.defer(thinking=True)
 
         try:
-            solves = await asyncio.to_thread(get_problem_solves, contest_id, problem_name)
+            # TODO: complete this command.
+            # this is how you send an image
+            # fig = await asyncio.to_thread(problemratings, id)
+            # await send_plotly_figure(
+            #     interaction,
+            #     fig,
+            #     filename=f"problemratings-{id}.png",
+            # )
+
+            solves = await asyncio.to_thread(
+                get_problem_solves, contest_id, problem_name
+            )
             await interaction.followup.send(
                 f"{problem_name} in contest {contest_id} has {solves} solves."
             )

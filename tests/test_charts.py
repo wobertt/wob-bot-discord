@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import plotly.graph_objects as go
 
-from wob_bot.charts import problemratings
+from wob_bot.problemratings import problemratings
 from wob_bot.plotting import figure_to_png_bytes
 
 
