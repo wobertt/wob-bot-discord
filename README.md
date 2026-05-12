@@ -47,9 +47,4 @@ plotly_get_chrome
 
 ## Adding New Commands
 
-1. Create a new file in the `wob_bot` directory with a function that returns text or a Plotly `Figure`.
-2. Add a slash-command wrapper in `wob_bot/commands.py`.
-3. In the wrapper, defer the interaction, call your plotting function, and pass the figure to `send_plotly_figure`.
-
-In `wob_bot/commands.py`, see `problemratings_command` for an example of a text command
-and `solvetimes` for an example of a Figure command.
+Create a new file in the `wob_bot` directory with a function that returns text or a Plotly `Figure`. Also add a slash-command wrapper in `wob_bot/commands.py`. See `problemratings_command` for an example of a text command and `solvetimes` for an example of a Figure command.
