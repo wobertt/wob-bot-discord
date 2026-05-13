@@ -5,9 +5,10 @@ import pandas as pd
 import numpy as np
 from tabulate import tabulate
 from .cf_api import cf_api
+import discord
 
 
-def problemratings(contest_id: int) -> str:
+def problemratings(contest_id: int) -> discord.Embed:
     """
     Example: output of problemratings(2033)
 
@@ -21,11 +22,6 @@ def problemratings(contest_id: int) -> str:
     F              598              1799
     G               15              2459
     """
-
-    def prettify_df(df: pd.DataFrame) -> str:
-        """Make the DataFrame output nice."""
-        df = df.rename_axis("problem")
-        return f"```{tabulate(df, headers=[df.index.name] + list(df.columns))}```"
 
     def calc_problem_rating(user_ratings: pd.Series, solve_count: int) -> int:
         """Calculate the rating of a problem."""
@@ -42,7 +38,7 @@ def problemratings(contest_id: int) -> str:
                 hi = test_rating
         return hi
 
-    _, problems, _, problem_results = cf_api.get_contest_standings(contest_id)
+    contest, problems, _, problem_results = cf_api.get_contest_standings(contest_id)
     rating_changes = cf_api.get_rating_changes(contest_id)
 
     data = pd.DataFrame(
@@ -53,11 +49,21 @@ def problemratings(contest_id: int) -> str:
             ).bestSubmissionTimeSeconds.count(),  # field is NaN iff unsolved by that handle
         )
     )
-    data["predicted_rating"] = data.solve_count.map(
+    if "rating" in problems.columns:
+        data["official"] = problems.rating
+    else:
+        data["official"] = "None"
+    data["predicted"] = data.solve_count.map(
         lambda cnt: calc_problem_rating(rating_changes.oldRating, cnt)
     )
 
-    return prettify_df(data.set_index("label"))
+    data = data.set_index("label").rename_axis("problem")
+
+    return discord.Embed(
+        title=contest["name"],
+        url=f"https://codeforces.com/contest/{contest_id}",
+        description=f"```{tabulate(data, headers=[data.index.name] + list(data.columns))}```",
+    )
 
 
 if __name__ == "__main__":

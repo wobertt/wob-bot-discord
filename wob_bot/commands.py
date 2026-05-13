@@ -30,8 +30,8 @@ def register_commands(bot: commands.Bot) -> None:
         await interaction.response.defer(thinking=True)
 
         try:
-            res = await asyncio.to_thread(problemratings, contest_id)
-            await interaction.followup.send(res)
+            embed = await asyncio.to_thread(problemratings, contest_id)
+            await interaction.followup.send(embed=embed)
 
         except Exception:
             logger.exception(

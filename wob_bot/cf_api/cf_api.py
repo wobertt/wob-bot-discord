@@ -32,6 +32,7 @@ def get_contest_standings(
     }
 
     PROBLEMS:
+    (note: rating column can be missing)
        contestId label                                   name         type  rating                                               tags
     0       2033     A                    Sakurako and Kosuke  PROGRAMMING     800    [constructive algorithms, implementation, math]
     1       2033     B                     Sakurako and Water  PROGRAMMING     900     [brute force, constructive algorithms, greedy]
