@@ -2,6 +2,6 @@
 
 from .bot import WobBot
 from .problemratings import problemratings
-from .solvetimes import solvetimes
+from .solve_info import solvetimes
 
-__all__ = ["WobBot", "solvetimes", "problemratings"]
+__all__ = ["WobBot", "solve_info", "problemratings"]
