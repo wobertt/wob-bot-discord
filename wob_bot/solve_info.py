@@ -37,7 +37,9 @@ def solvetimes(contest_id: int, problem_name: str) -> go.Figure:
     # exclude NA results from the ratings, otherwise our bins will look bad
     # on ranges with low/zero solve rates.
     time_data = time_data[time_data.solve_time.notna()]
-    time_data["rating_bin"] = pd.qcut(time_data.rating, q=isqrt(time_data.shape[0]))
+    time_data["rating_bin"] = pd.qcut(
+        time_data.rating, q=isqrt(time_data.shape[0]), duplicates="drop"
+    )
 
     grouped_data = time_data.groupby("rating_bin").agg(
         rating=("rating", "median"),
@@ -62,7 +64,9 @@ def solvechance(contest_id: int, problem_name: str) -> go.Figure:
     """Plot solve chance by rating."""
 
     time_data = get_time_data(contest_id, problem_name)
-    time_data["rating_bin"] = pd.qcut(time_data.rating, q=isqrt(time_data.shape[0]))
+    time_data["rating_bin"] = pd.qcut(
+        time_data.rating, q=isqrt(time_data.shape[0]), duplicates="drop"
+    )
 
     grouped_data = time_data.groupby("rating_bin").agg(
         rating=("rating", "median"),
