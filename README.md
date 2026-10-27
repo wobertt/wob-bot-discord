@@ -39,7 +39,7 @@ python3 -m wob_bot
 In background:
 
 ```bash
-nohup python3 -u script.py > script.log 2>&1 < /dev/null &
+nohup python3 -u -m wob_bot > script.log 2>&1 < /dev/null &
 ```
 
 Invite the bot with the `bot` and `applications.commands` OAuth2 scopes. The bot needs permission to send messages and attach files.
