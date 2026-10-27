@@ -50,7 +50,7 @@ def test_excluded_solves_do_not_change_predictions(cache, monkeypatch):
     setup_command(monkeypatch, ["a", "b", "missing"], [[1, 0], [0, 0], [0, 0]])
     no_excluded_solves = module.problemratings(2, cache)
     assert result.embed.description == no_excluded_solves.embed.description
-    assert "1600" in result.embed.description
+    assert "1,600" in result.embed.description
     assert ">=8000" in result.embed.description
     assert result.included_count == 2
     assert result.excluded_count == 1
@@ -70,10 +70,10 @@ def test_published_ratings_override_history_and_first_timers_are_excluded(
         ),
     )
     result = module.problemratings(2, cache)
-    assert "1800" in result.embed.description
+    assert "1,800" in result.embed.description
     assert result.included_count == 2
     assert result.excluded_count == 1
-    assert "0 cached historical ratings" in result.embed.footer.text
+    assert result.embed.footer.text == "2 participants"
 
 
 def test_real_zero_rating_is_retained_with_evidence_of_prior_participation(
@@ -134,7 +134,7 @@ def test_empty_standings_and_partial_official_ratings(cache, monkeypatch):
     setup_command(monkeypatch, [], [], official=[800, np.nan])
     result = module.problemratings(2, cache)
     assert result.included_count == result.excluded_count == 0
-    assert "None" in result.embed.description
+    assert "—" in result.embed.description
     assert "800" in result.embed.description
 
 

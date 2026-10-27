@@ -102,21 +102,34 @@ def problemratings(
             "solve_count": solve_counts.reindex(problems.index, fill_value=0),
         }
     )
-    data["official"] = [
-        int(value) if pd.notna(value) else "None"
-        for value in problems.get(
-            "rating", pd.Series(index=problems.index, dtype=float)
-        )
-    ]
     user_ratings = np.array(list(ratings.values()), dtype=float)
     data["predicted"] = data.solve_count.map(
         lambda count: calc_problem_rating(user_ratings, count)
     )
-    data = data.set_index("label").rename_axis("problem")
-
-    description = (
-        f"```{tabulate(data, headers=[data.index.name] + list(data.columns))}```"
+    display = pd.DataFrame(
+        {
+            "Problem": data.label,
+            "Predicted": data.predicted.map(
+                lambda value: (
+                    f"{value:,}" if isinstance(value, (int, np.integer)) else value
+                )
+            ),
+        }
     )
+    if "rating" in problems and problems.rating.notna().any():
+        display["Official"] = problems.rating.map(
+            lambda value: f"{int(value):,}" if pd.notna(value) else "—"
+        )
+    display["Solves"] = data.solve_count.map(lambda value: f"{value:,}")
+    table = tabulate(
+        display,
+        headers="keys",
+        showindex=False,
+        tablefmt="plain",
+        colalign=("left",) + ("right",) * (len(display.columns) - 1),
+        disable_numparse=True,
+    )
+    description = f"```text\n{table}\n```"
     if not ratings:
         description += (
             "\nNo participants with usable pre-contest ratings are available."
@@ -126,12 +139,11 @@ def problemratings(
         url=f"https://codeforces.com/contest/{contest_id}",
         description=description,
     )
-    notes = [
-        f"Based on {len(ratings)} participants",
-        f"{cached_count} cached historical ratings",
-    ]
+    notes = [f"{len(ratings):,} participants"]
+    if cached_count:
+        notes.append(f"{cached_count:,} cached ratings")
     if not history.history_ready:
-        notes.append("History cache warming")
+        notes.append("Cache warming")
     if (
         contest["phase"] != "FINISHED"
         or contest.get("frozen", False)
