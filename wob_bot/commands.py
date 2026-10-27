@@ -10,13 +10,15 @@ from discord import app_commands
 from discord.ext import commands
 
 from .problemratings import problemratings
+from .cf_api.cf_api import CodeforcesApiError
 from .plotting import send_plotly_figure
+from .rating_cache import RatingCache
 from .solve_info import solvetimes, solvechance
 
 logger = logging.getLogger(__name__)
 
 
-def register_commands(bot: commands.Bot) -> None:
+def register_commands(bot: commands.Bot, rating_cache: RatingCache) -> None:
     """Register slash commands on the bot's command tree."""
 
     @bot.tree.command(
@@ -30,8 +32,13 @@ def register_commands(bot: commands.Bot) -> None:
         await interaction.response.defer(thinking=True)
 
         try:
-            embed = await asyncio.to_thread(problemratings, contest_id)
-            await interaction.followup.send(embed=embed)
+            result = await asyncio.to_thread(problemratings, contest_id, rating_cache)
+            await interaction.followup.send(
+                content=result.chat_text, embed=result.embed
+            )
+
+        except (CodeforcesApiError, ValueError) as exc:
+            await interaction.followup.send(str(exc))
 
         except Exception:
             logger.exception(

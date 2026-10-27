@@ -2,14 +2,94 @@
 Commands for interacting with the Codeforces API.
 """
 
-import requests
+import threading
+import time
+
 import pandas as pd
+import requests
 
 
-def make_request(api_endpoint: str):
-    r = requests.get(f"https://codeforces.com/api/{api_endpoint}")
-    r.raise_for_status()
-    return r.json()["result"]
+class CodeforcesApiError(RuntimeError):
+    """An unsuccessful Codeforces request, with a user-readable explanation."""
+
+
+class RatingChangesUnavailableError(CodeforcesApiError):
+    """The contest has no published rating changes yet."""
+
+
+class RequestCancelled(Exception):
+    """A background request was stopped before it could be sent."""
+
+
+_request_lock = threading.Lock()
+_next_request_at = 0.0
+_REQUEST_INTERVAL = 2.0
+_RATING_CHANGE_COLUMNS = [
+    "handle",
+    "rank",
+    "ratingUpdateTimeSeconds",
+    "oldRating",
+    "newRating",
+]
+
+
+def _wait_for_request_slot(cancel_event: threading.Event | None) -> None:
+    global _next_request_at
+    with _request_lock:
+        delay = max(0.0, _next_request_at - time.monotonic())
+        if cancel_event is not None:
+            if cancel_event.wait(delay):
+                raise RequestCancelled
+        else:
+            time.sleep(delay)
+        _next_request_at = time.monotonic() + _REQUEST_INTERVAL
+
+
+def make_request(api_endpoint: str, *, cancel_event: threading.Event | None = None):
+    """Make a bounded, globally rate-limited request from any bot thread."""
+    for attempt in range(3):
+        _wait_for_request_slot(cancel_event)
+        try:
+            response = requests.get(
+                f"https://codeforces.com/api/{api_endpoint}", timeout=(5, 30)
+            )
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            if attempt < 2:
+                continue
+            raise CodeforcesApiError(
+                "Codeforces could not be reached. Try again later."
+            ) from exc
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            if attempt < 2 and (
+                response.status_code == 429 or response.status_code >= 500
+            ):
+                continue
+            raise CodeforcesApiError(
+                "Codeforces returned an invalid response."
+            ) from exc
+
+        if not isinstance(payload, dict):
+            raise CodeforcesApiError("Codeforces returned an invalid response.")
+        comment = str(payload.get("comment", f"HTTP {response.status_code}"))
+        if (
+            response.status_code == 429
+            or response.status_code >= 500
+            or "limit exceeded" in comment.lower()
+        ) and attempt < 2:
+            continue
+        if "rating changes are unavailable" in comment.lower():
+            raise RatingChangesUnavailableError(comment)
+        if not response.ok or payload.get("status") != "OK" or "result" not in payload:
+            raise CodeforcesApiError(f"Codeforces: {comment}")
+        return payload["result"]
+    raise AssertionError("Unreachable")
+
+
+def get_contests(*, cancel_event: threading.Event | None = None) -> list[dict]:
+    return make_request("contest.list", cancel_event=cancel_event)
 
 
 def get_contest_standings(
@@ -75,11 +155,16 @@ def get_contest_standings(
 
     def parse_standings_row(row: dict) -> tuple[dict, pd.DataFrame]:
         """Parse one row of the 'rows' section in /api/contest.standings."""
-        # only support single-party teams for now
-        assert len(row["party"]["members"]) == 1
+        if len(row["party"]["members"]) != 1:
+            raise ValueError(
+                "Only contests with individual participants are supported."
+            )
         handle = row["party"]["members"][0]["handle"]
 
-        participant_info = {"handle": handle} | {
+        participant_info = {
+            "handle": handle,
+            "participantType": row["party"].get("participantType", "CONTESTANT"),
+        } | {
             key: row[key]
             for key in (
                 "rank",
@@ -100,8 +185,35 @@ def get_contest_standings(
     problems = pd.DataFrame(json["problems"]).rename(columns={"index": "label"})
 
     standings = tuple(parse_standings_row(row) for row in json["rows"])
-    participants = pd.DataFrame(p_info for p_info, _ in standings)
+    participants = pd.DataFrame(
+        (p_info for p_info, _ in standings),
+        columns=[
+            "handle",
+            "participantType",
+            "rank",
+            "points",
+            "penalty",
+            "successfulHackCount",
+            "unsuccessfulHackCount",
+        ],
+    )
+    if not standings:
+        return (
+            contest,
+            problems,
+            participants,
+            pd.DataFrame(
+                columns=[
+                    "problem_index",
+                    "handle",
+                    "points",
+                    "bestSubmissionTimeSeconds",
+                ]
+            ),
+        )
     problem_results = pd.concat(results for _, results in standings)
+    if "bestSubmissionTimeSeconds" not in problem_results:
+        problem_results["bestSubmissionTimeSeconds"] = float("nan")
 
     # Some fixups.
     problem_results = problem_results.reset_index(names="problem_index")
@@ -109,7 +221,9 @@ def get_contest_standings(
     return contest, problems, participants, problem_results
 
 
-def get_rating_changes(contest_id: int) -> pd.DataFrame:
+def get_rating_changes(
+    contest_id: int, *, cancel_event: threading.Event | None = None
+) -> pd.DataFrame:
     """
     Example:
     print(get_rating_changes(2033))
@@ -129,9 +243,13 @@ def get_rating_changes(contest_id: int) -> pd.DataFrame:
 
     [22432 rows x 5 columns]
     """
-    json = make_request(f"contest.ratingChanges?contestId={contest_id}")
-    rating_changes = pd.DataFrame(json).drop(columns=["contestId", "contestName"])
-    return rating_changes
+    try:
+        changes = make_request(
+            f"contest.ratingChanges?contestId={contest_id}", cancel_event=cancel_event
+        )
+    except RatingChangesUnavailableError:
+        changes = []
+    return pd.DataFrame(changes, columns=_RATING_CHANGE_COLUMNS)
 
 
 # Functions to confirm that the output looks right.
