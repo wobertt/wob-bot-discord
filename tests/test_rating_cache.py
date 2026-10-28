@@ -195,3 +195,47 @@ def test_shutdown_during_fetch_does_not_save_a_partial_download(cache, monkeypat
         assert cache.published_ratings(1) == {}
 
     asyncio.run(run())
+
+
+def test_inaccessible_counts_as_checked_and_can_recover(cache):
+    now = RECENT_WINDOW * 2
+    cache.store_contests([contest(1), contest(2)])
+    cache.store_rating_changes(1, changes(("a", 0, 1200, 110)), now=now)
+    assert not cache.ratings_before(["a"], 200).history_ready
+    cache.mark_inaccessible(2, now=now)
+    assert cache.progress() == (2, 2)
+    assert cache.ratings_before(["a"], 200).history_ready
+    reopened = RatingCache(cache.path)
+    assert reopened.next_contest(now=now + 1) is None
+    assert reopened.next_contest(now=now + UNAVAILABLE_RETRY_INTERVAL) == 2
+    reopened.store_rating_changes(2, changes(("a", 1200, 1400, 150)))
+    assert reopened.ratings_before(["a"], 200).ratings == {"a": 1400}
+    reopened.mark_inaccessible(2)
+    assert reopened.published_ratings(2) == {"a": 1200}
+
+
+def test_updater_skips_inaccessible_and_reports_ready(cache, monkeypatch, caplog):
+    import logging
+
+    async def run():
+        updater = RatingCacheUpdater(cache)
+        monkeypatch.setattr(cf_api, "get_contests", lambda **kw: [contest()])
+        def missing(*args, **kw):
+            raise cf_api.ContestNotFoundError("Contest not found")
+        monkeypatch.setattr(cf_api, "get_rating_changes", missing)
+        task = asyncio.create_task(updater.run())
+        try:
+            async with asyncio.timeout(3):
+                while "Rating cache ready" not in caplog.text:
+                    await asyncio.sleep(0.01)
+        finally:
+            updater.stop()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        assert cache.progress() == (1, 1)
+        assert "Could not cache" not in caplog.text
+    with caplog.at_level(logging.INFO):
+        asyncio.run(run())

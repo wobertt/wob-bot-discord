@@ -18,6 +18,10 @@ class UserNotFoundError(CodeforcesApiError):
     """The requested Codeforces handle no longer resolves."""
 
 
+class ContestNotFoundError(CodeforcesApiError):
+    """A contest is missing or inaccessible through the public API."""
+
+
 class RatingChangesUnavailableError(CodeforcesApiError):
     """The contest has no published rating changes yet."""
 
@@ -87,6 +91,14 @@ def make_request(api_endpoint: str, *, cancel_event: threading.Event | None = No
             continue
         if api_endpoint.startswith("user.info?") and "not found" in comment.lower() and response.status_code < 500:
             raise UserNotFoundError(comment)
+        if (
+            api_endpoint.startswith("contest.")
+            and payload.get("status") == "FAILED"
+            and response.status_code in (200, 400, 404)
+            and "contest" in comment.lower()
+            and "not found" in comment.lower()
+        ):
+            raise ContestNotFoundError(f"Codeforces: {comment}")
         if "rating changes are unavailable" in comment.lower():
             raise RatingChangesUnavailableError(comment)
         if not response.ok or payload.get("status") != "OK" or "result" not in payload:

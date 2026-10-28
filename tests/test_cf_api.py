@@ -191,3 +191,21 @@ def test_stopped_background_request_is_not_sent():
     stopped.set()
     with pytest.raises(cf_api.RequestCancelled):
         real_wait_for_slot(stopped)
+
+
+@pytest.mark.parametrize("status", [200, 400, 404])
+def test_not_found_contest_has_specific_error(monkeypatch, status):
+    monkeypatch.setattr(cf_api.requests, "get", Mock(return_value=response(
+        {"status": "FAILED", "comment": "contestId: Contest with id 826 not found"}, status
+    )))
+    with pytest.raises(cf_api.ContestNotFoundError):
+        cf_api.get_rating_changes(826)
+
+
+def test_server_failure_is_not_classified_as_inaccessible(monkeypatch):
+    monkeypatch.setattr(cf_api.requests, "get", Mock(return_value=response(
+        {"status": "FAILED", "comment": "Contest not found"}, 503
+    )))
+    with pytest.raises(cf_api.CodeforcesApiError) as error:
+        cf_api.get_rating_changes(826)
+    assert not isinstance(error.value, cf_api.ContestNotFoundError)

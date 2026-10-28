@@ -205,6 +205,16 @@ class RatingCache:
                 ),
             )
 
+    def mark_inaccessible(self, contest_id: int, *, now: float | None = None) -> None:
+        """Count explicit not-found responses as checked, but retry daily."""
+        now = time.time() if now is None else now
+        with self.connection() as conn:
+            conn.execute(
+                """UPDATE contest SET last_checked=?, status='inaccessible',
+                   retry_after=? WHERE id=?""",
+                (now, now + UNAVAILABLE_RETRY_INTERVAL, contest_id),
+            )
+
     def mark_fetch_error(self, contest_id: int, *, now: float | None = None) -> None:
         now = time.time() if now is None else now
         with self.connection() as conn:
@@ -218,7 +228,7 @@ class RatingCache:
         with self.connection() as conn:
             row = conn.execute(
                 """SELECT id FROM contest WHERE phase='FINISHED' AND retry_after <= ?
-                   AND (last_checked IS NULL OR status='unavailable' OR end_time >= ?)
+                   AND (last_checked IS NULL OR status IN ('unavailable', 'inaccessible') OR end_time >= ?)
                    ORDER BY CASE WHEN last_checked IS NOT NULL AND end_time >= ?
                        THEN 0 ELSE 1 END, start_time, id LIMIT 1""",
                 (now, now - RECENT_WINDOW, now - RECENT_WINDOW),
@@ -280,6 +290,7 @@ class RatingCacheUpdater:
     async def run(self) -> None:
         """Yield between requests; checkpoints survive cancellation and restarts."""
         next_catalog_refresh = 0.0
+        ready_reported = False
         while not self.cancel_event.is_set():
             try:
                 await asyncio.to_thread(self.cache.initialize_current_ratings)
@@ -292,6 +303,11 @@ class RatingCacheUpdater:
                     await asyncio.to_thread(self.cache.store_contests, contests)
                     next_catalog_refresh = time.monotonic() + REFRESH_INTERVAL
 
+                checked, total = await asyncio.to_thread(self.cache.progress)
+                ready = total > 0 and checked == total
+                if ready and not ready_reported:
+                    logger.info("Rating cache ready: all %s contests checked; inaccessible contests skipped.", total)
+                ready_reported = ready
                 contest_id = await asyncio.to_thread(self.cache.next_contest)
                 if contest_id is None:
                     await asyncio.sleep(60)
@@ -302,6 +318,12 @@ class RatingCacheUpdater:
                         contest_id,
                         cancel_event=self.cancel_event,
                     )
+                except cf_api.ContestNotFoundError:
+                    if self.cancel_event.is_set():
+                        return
+                    await asyncio.to_thread(self.cache.mark_inaccessible, contest_id)
+                    logger.info("Skipping inaccessible contest %s; rechecking in one day.", contest_id)
+                    continue
                 except cf_api.CodeforcesApiError as exc:
                     await asyncio.to_thread(self.cache.mark_fetch_error, contest_id)
                     logger.warning("Could not cache contest %s: %s", contest_id, exc)
