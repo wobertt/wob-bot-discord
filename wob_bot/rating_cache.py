@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import logging
 import os
+import random
 from pathlib import Path
 import sqlite3
 import threading
@@ -58,6 +59,11 @@ class RatingCache:
                 );
                 CREATE INDEX IF NOT EXISTS rating_history
                     ON rating_change(handle, rating_update_time DESC);
+                CREATE TABLE IF NOT EXISTS current_rating (
+                    handle TEXT PRIMARY KEY, rating INTEGER NOT NULL,
+                    rating_update_time INTEGER NOT NULL, contest_id INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS current_rating_value ON current_rating(rating);
                 CREATE TABLE IF NOT EXISTS cache_state (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -72,6 +78,50 @@ class RatingCache:
                 yield conn
         finally:
             conn.close()
+
+    def initialize_current_ratings(self) -> None:
+        """Build once atomically; WAL readers can still report warming up."""
+        with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM cache_state WHERE key='current_ratings_ready'").fetchone():
+                return
+            conn.execute("DELETE FROM current_rating")
+            conn.execute("""INSERT INTO current_rating
+                SELECT handle, new_rating, rating_update_time, contest_id FROM (
+                    SELECT *, row_number() OVER (
+                        PARTITION BY handle ORDER BY rating_update_time DESC, contest_id DESC
+                    ) AS position FROM rating_change
+                ) WHERE position=1""")
+            conn.execute("INSERT INTO cache_state VALUES ('current_ratings_ready', '1')")
+
+    def nearest_users(self, rating: int, limit: int = 5) -> list[tuple[str, int]]:
+        with self.connection() as conn:
+            conn.execute("BEGIN")
+            if not conn.execute("SELECT 1 FROM cache_state WHERE key='current_ratings_ready'").fetchone():
+                raise ValueError("The user lookup is warming up. Please try again shortly.")
+            lower = conn.execute(
+                "SELECT DISTINCT rating FROM current_rating WHERE rating <= ? ORDER BY rating DESC LIMIT ?",
+                (rating, limit),
+            ).fetchall()
+            upper = conn.execute(
+                "SELECT DISTINCT rating FROM current_rating WHERE rating > ? ORDER BY rating LIMIT ?",
+                (rating, limit),
+            ).fetchall()
+            distances = {}
+            for (value,) in lower + upper:
+                distances.setdefault(abs(value - rating), []).append(value)
+            result = []
+            for distance in sorted(distances):
+                candidates = []
+                for value in distances[distance]:
+                    candidates.extend(conn.execute(
+                        "SELECT handle, rating FROM current_rating WHERE rating=?", (value,)
+                    ).fetchall())
+                random.shuffle(candidates)
+                result.extend(candidates[:limit - len(result)])
+                if len(result) == limit:
+                    break
+            return result
 
     @staticmethod
     def _record_contests(conn: sqlite3.Connection, contests: list[dict]) -> None:
@@ -125,6 +175,15 @@ class RatingCache:
                     )
                     for row in changes.itertuples(index=False)
                 ),
+            )
+            # Recompute affected handles to handle corrected timestamps and
+            # out-of-order contest refreshes without regressing current ratings.
+            conn.executemany(
+                """INSERT OR REPLACE INTO current_rating
+                   SELECT handle, new_rating, rating_update_time, contest_id
+                   FROM rating_change WHERE handle=?
+                   ORDER BY rating_update_time DESC, contest_id DESC LIMIT 1""",
+                ((handle.casefold(),) for handle in set(changes["handle"])),
             )
             has_changes = (
                 conn.execute(
@@ -223,6 +282,7 @@ class RatingCacheUpdater:
         next_catalog_refresh = 0.0
         while not self.cancel_event.is_set():
             try:
+                await asyncio.to_thread(self.cache.initialize_current_ratings)
                 if time.monotonic() >= next_catalog_refresh:
                     contests = await asyncio.to_thread(
                         cf_api.get_contests, cancel_event=self.cancel_event

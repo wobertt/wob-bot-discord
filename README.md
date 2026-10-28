@@ -7,6 +7,17 @@ A small Python Discord bot for interactions with the Codeforces API.
 - `/probrat [contest_id]`: Estimate problem ratings using published pre-contest ratings or cached rating history, including before rating changes are released.
 - `/solvetimes [contest_id] [problem_id]`: Plot solve times by rating for a specified problem.
 
+`/fetchuser rating` finds an exact rating match or the closest cached user, randomly
+choosing among ties. It verifies up to five candidates against their current
+Codeforces profiles and shows a linked handle, rank, rating, and rating difference.
+Selection uses the historical cache, so during rating updates the result may not
+be the globally closest live user. Missing accounts and changed ratings are skipped.
+
+On the first restart after this update, the bot builds an indexed current-rating
+lookup from the existing history in the background. Commands report that the lookup
+is warming up until this atomic backfill finishes. Later restarts reuse it, and
+contest refreshes maintain it automatically. No extra rated-user download is needed.
+
 ## Setup (untested, generated with codex)
 
 Create a virtual environment, install dependencies, and add your server ID to `.env`:

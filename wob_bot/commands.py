@@ -9,6 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from .fetchuser import fetchuser
 from .problemratings import problemratings
 from .cf_api.cf_api import CodeforcesApiError
 from .plotting import send_plotly_figure
@@ -20,6 +21,19 @@ logger = logging.getLogger(__name__)
 
 def register_commands(bot: commands.Bot, rating_cache: RatingCache) -> None:
     """Register slash commands on the bot's command tree."""
+
+    @bot.tree.command(name="fetchuser", description="Find a Codeforces user at or near a rating.")
+    @app_commands.describe(rating="Target current Codeforces rating.")
+    async def fetchuser_command(interaction: discord.Interaction, rating: int) -> None:
+        await interaction.response.defer(thinking=True)
+        try:
+            embed = await asyncio.to_thread(fetchuser, rating, rating_cache)
+            await interaction.followup.send(embed=embed)
+        except (CodeforcesApiError, ValueError) as exc:
+            await interaction.followup.send(str(exc))
+        except Exception:
+            logger.exception("Failed to fetch a user for rating=%s.", rating)
+            await interaction.followup.send("Failed to find a Codeforces user. Please try again later.")
 
     @bot.tree.command(
         name="probrat",

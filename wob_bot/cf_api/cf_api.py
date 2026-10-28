@@ -4,6 +4,7 @@ Commands for interacting with the Codeforces API.
 
 import threading
 import time
+from urllib.parse import urlencode
 
 import pandas as pd
 import requests
@@ -11,6 +12,10 @@ import requests
 
 class CodeforcesApiError(RuntimeError):
     """An unsuccessful Codeforces request, with a user-readable explanation."""
+
+
+class UserNotFoundError(CodeforcesApiError):
+    """The requested Codeforces handle no longer resolves."""
 
 
 class RatingChangesUnavailableError(CodeforcesApiError):
@@ -80,6 +85,8 @@ def make_request(api_endpoint: str, *, cancel_event: threading.Event | None = No
             or "limit exceeded" in comment.lower()
         ) and attempt < 2:
             continue
+        if api_endpoint.startswith("user.info?") and "not found" in comment.lower() and response.status_code < 500:
+            raise UserNotFoundError(comment)
         if "rating changes are unavailable" in comment.lower():
             raise RatingChangesUnavailableError(comment)
         if not response.ok or payload.get("status") != "OK" or "result" not in payload:
@@ -269,3 +276,10 @@ def test_rating_changes():
 if __name__ == "__main__":
     # test_contest_standings()
     test_rating_changes()
+
+
+def get_user_info(handle: str) -> dict:
+    users = make_request("user.info?" + urlencode({"handles": handle}))
+    if not isinstance(users, list) or len(users) != 1 or not isinstance(users[0], dict):
+        raise CodeforcesApiError("Codeforces returned an invalid user profile.")
+    return users[0]
