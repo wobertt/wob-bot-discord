@@ -580,7 +580,6 @@ def perf(handle: str, contest_id: int, cache: RatingCache) -> discord.Embed:
     contest_name = rated["contestName"] if rated else f"Contest {contest_id}"
     fields: list[tuple[str, str]] = []
     perfs: list[float] = []
-    estimated = False
 
     if rated is not None:
         delta = rated["newRating"] - rated["oldRating"]
@@ -605,7 +604,6 @@ def perf(handle: str, contest_id: int, cache: RatingCache) -> discord.Embed:
             if result.perf is None:
                 fields.append((name, f"Perf: unavailable ({result.skip_reason})"))
                 continue
-            estimated = True
             perfs.append(result.perf)
             score = f"{result.points:g}" + (
                 f", penalty {result.penalty}" if result.penalty is not None else ""
@@ -626,10 +624,6 @@ def perf(handle: str, contest_id: int, cache: RatingCache) -> discord.Embed:
     )
     for name, value in fields:
         embed.add_field(name=name, value=value, inline=True)
-    footer = "Performance via carrot's method"
-    if estimated:
-        footer += " · Virtual scores rebuilt from submissions and ranked among rated contestants"
-    embed.set_footer(text=footer)
     return embed
 
 
