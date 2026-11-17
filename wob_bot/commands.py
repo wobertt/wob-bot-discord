@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
+import random
 import re
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from .fetchuser import fetchuser
+from .fetchuser import RANK_COLORS, fetchuser
 from .problemratings import problemratings
 from .cf_api.cf_api import CodeforcesApiError
 from .performance import perf, perfgraph
@@ -97,11 +99,16 @@ def register_commands(bot: commands.Bot, rating_cache: RatingCache) -> None:
                 date_from,
                 date_to,
             )
-            await send_plotly_figure(
-                interaction,
-                result.figure,
-                filename=f"perfgraph-{re.sub(r'[^A-Za-z0-9_.-]', '_', handle)}.png",
-                content=result.note or None,
+            filename = f"perfgraph-{re.sub(r'[^A-Za-z0-9_.-]', '_', handle)}.png"
+            # Same presentation as TLE: the graph inside a random CF-colored embed.
+            embed = discord.Embed(
+                title="Performance graph on Codeforces",
+                description=result.note or None,
+                color=random.choice(list(RANK_COLORS.values())),
+            )
+            embed.set_image(url=f"attachment://{filename}")
+            await interaction.followup.send(
+                embed=embed, file=discord.File(io.BytesIO(result.png), filename=filename)
             )
         except (CodeforcesApiError, ValueError) as exc:
             await interaction.followup.send(str(exc))

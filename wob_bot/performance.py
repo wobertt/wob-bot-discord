@@ -16,14 +16,15 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import io
 import math
 import re
+import threading
 from urllib.parse import quote
 
 import discord
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 
 from .cf_api import cf_api
 from .fetchuser import RANK_COLORS
@@ -634,12 +635,44 @@ def perf(handle: str, contest_id: int, cache: RatingCache) -> discord.Embed:
 INCLUDE_CHOICES = ("both", "rated", "virtual")
 # Slow requests (2s each) allowed per graph before the rest is left for next time.
 GRAPH_FETCH_BUDGET = 60
+INFINITE_PERF_FLOOR = 3000
+INFINITE_PERF_MARGIN = 200
+# TLE's rating_color_cycler: first color for contests, second for virtuals.
+CONTEST_COLOR = "#5d4dff"
+VIRTUAL_COLOR = "#009ccc"
+# TLE's RATED_RANKS bands, including its 4000+ tier.
+GRAPH_BANDS = RANK_BANDS[:-1] + (
+    (3000, 4000, "legendary grandmaster", "#AA0000"),
+    (4000, 10**9, "tourist", "#330000"),
+)
+
+
+@dataclass(frozen=True)
+class GraphPoint:
+    timestamp: int
+    perf: float
+    virtual: bool
 
 
 @dataclass
 class GraphResult:
-    figure: go.Figure
+    png: bytes
     note: str
+    points: list[GraphPoint]
+    labels: list[str]
+
+
+def plotted_points(points: list[GraphPoint]) -> list[GraphPoint]:
+    """Chronological points with infinite perfs drawn at a fixed height."""
+    finite = [p.perf for p in points if not math.isinf(p.perf)]
+    ceiling = max(INFINITE_PERF_FLOOR, max(finite, default=-math.inf) + INFINITE_PERF_MARGIN)
+    return sorted(
+        (
+            GraphPoint(p.timestamp, ceiling if math.isinf(p.perf) else p.perf, p.virtual)
+            for p in points
+        ),
+        key=lambda p: (p.timestamp, p.virtual),
+    )
 
 
 def perfgraph(
@@ -663,9 +696,8 @@ def perfgraph(
     history = _user_rating(handle)
     display_handle = history[-1]["handle"] if history else handle
     current = history[-1]["newRating"] if history else None
-    rated_points: list[tuple[int, float]] = []
-    virtual_points: list[tuple[int, float]] = []
-    infinite = skipped = pending = 0
+    points: list[GraphPoint] = []
+    skipped = pending = 0
 
     if include in ("both", "rated"):
         for entry in history:
@@ -680,10 +712,7 @@ def perfgraph(
             except PerfUnavailable:
                 skipped += 1
                 continue
-            if math.isinf(value):
-                infinite += 1
-            else:
-                rated_points.append((when, value))
+            points.append(GraphPoint(when, value, False))
 
     if include in ("both", "virtual"):
         try:
@@ -700,14 +729,12 @@ def perfgraph(
         for result in results:
             if result.perf is None:
                 skipped += 1
-            elif math.isinf(result.perf):
-                infinite += 1
             else:
-                virtual_points.append((result.start_time, result.perf))
+                points.append(GraphPoint(result.start_time, result.perf, True))
         if submissions and not history:
             display_handle = submissions[0]["author"]["members"][0]["handle"]
 
-    if not rated_points and not virtual_points:
+    if not points:
         what = {"both": "rated or virtual", "rated": "rated", "virtual": "virtual"}[include]
         extra = (
             f" {pending} still need to be downloaded; try again in a few minutes."
@@ -718,10 +745,18 @@ def perfgraph(
             f"{' in that date range' if lo or hi else ''}.{extra}"
         )
 
-    figure = _perf_figure(display_handle, current, rated_points, virtual_points, lo, hi)
+    infinite = sum(math.isinf(p.perf) for p in points)
+    plotted = plotted_points(points)
+    labels = []
+    if any(not p.virtual for p in plotted):
+        labels.append(f"{display_handle} ({current if current is not None else 'Unrated'})")
+    if any(p.virtual for p in plotted):
+        labels.append(f"{display_handle} (virtual)")
+    png = render_perf_graph(plotted, labels)
+
     notes = []
     if infinite:
-        notes.append(f"{infinite} rank-1 finish(es) have infinite performance and are not plotted.")
+        notes.append(f"Infinite performances (rank 1): {infinite}")
     if skipped:
         notes.append(f"{skipped} participation(s) skipped (unrated, unsupported or unavailable).")
     if pending:
@@ -729,65 +764,83 @@ def perfgraph(
             f"{pending} participation(s) still need data from Codeforces; "
             "run the command again to include them."
         )
-    if virtual_points:
+    if any(p.virtual for p in plotted):
         notes.append("Virtual performances are estimates.")
-    return GraphResult(figure, "\n".join(notes))
+    return GraphResult(png, "\n".join(notes), plotted, labels)
 
 
-def _perf_figure(
-    handle: str,
-    current: int | None,
-    rated_points: list[tuple[int, float]],
-    virtual_points: list[tuple[int, float]],
-    lo: int | None,
-    hi: int | None,
-) -> go.Figure:
-    figure = go.Figure()
-    series = (
-        (rated_points, f"{handle} ({current if current is not None else 'Unrated'})",
-         "#5d4dff", "solid"),
-        (virtual_points, f"{handle} virtual", "#009ccc", "dash"),
-    )
-    values = []
-    for points, name, color, dash in series:
-        if not points:
-            continue
-        points = sorted(points)
-        values.extend(v for _, v in points)
-        figure.add_trace(go.Scatter(
-            x=[datetime.fromtimestamp(t, timezone.utc) for t, _ in points],
-            y=[v for _, v in points],
-            name=name,
-            showlegend=True,
-            mode="lines+markers",
-            line=dict(color=color, width=1.5, dash=dash),
-            marker=dict(size=6, color="white", line=dict(color=color, width=1.2)),
-        ))
+# matplotlib's rc_context mutates global state; one render at a time.
+_RENDER_LOCK = threading.Lock()
 
-    low, high = min(values), max(values)
-    pad = max(50, 0.08 * (high - low))
-    y_range = [low - pad, high + pad]
-    for band_low, band_high, _, color in RANK_BANDS:
-        if band_high <= y_range[0] or band_low >= y_range[1]:
-            continue
-        figure.add_hrect(
-            y0=max(band_low, y_range[0]), y1=min(band_high, y_range[1]),
-            fillcolor=color, opacity=0.8, line_width=0.5, line_color="white",
-            layer="below",
-        )
 
-    title = "Performance graph on Codeforces"
-    if lo is not None or hi is not None:
-        start = datetime.fromtimestamp(lo, timezone.utc).date() if lo is not None else "start"
-        end = datetime.fromtimestamp(hi, timezone.utc).date() if hi is not None else "now"
-        title += f" ({start} to {end})"
-    figure.update_layout(
-        title=title,
-        template="plotly_white",
-        plot_bgcolor="white",
-        yaxis=dict(range=y_range, title="Performance", showgrid=False, zeroline=False),
-        xaxis=dict(showgrid=True, gridcolor="white", gridwidth=0.5),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(l=60, r=30, t=90, b=50),
-    )
-    return figure
+def _tle_style() -> dict:
+    """TLE's theme: sns.set() then darkgrid with its axes overrides, 7x3.5in."""
+    import seaborn as sns
+
+    style = {}
+    style.update(sns.plotting_context("notebook"))
+    style.update(sns.axes_style("darkgrid", {
+        "axes.edgecolor": "#A0A0C5",
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+    }))
+    style["figure.figsize"] = (7.0, 3.5)
+    return style
+
+
+def render_perf_graph(points: list[GraphPoint], labels: list[str]) -> bytes:
+    """Render like TLE's ;plot perf, with one line through every participation."""
+    import matplotlib
+
+    matplotlib.use("agg")
+    from matplotlib import pyplot as plt
+    from matplotlib.lines import Line2D
+
+    when = [datetime.fromtimestamp(p.timestamp, timezone.utc).replace(tzinfo=None)
+            for p in points]
+    values = [p.perf for p in points]
+    marker_style = dict(marker="o", markersize=3, markerfacecolor="white",
+                        markeredgewidth=0.5)
+
+    with _RENDER_LOCK, plt.rc_context(_tle_style()):
+        fig, ax = plt.subplots()
+        try:
+            # Each segment takes the color of the participation it leads to.
+            if len(points) == 1:
+                ax.plot(when, values, linestyle="none", **marker_style,
+                        color=VIRTUAL_COLOR if points[0].virtual else CONTEST_COLOR)
+            for i in range(1, len(points)):
+                color = VIRTUAL_COLOR if points[i].virtual else CONTEST_COLOR
+                ax.plot(when[i - 1:i + 1], values[i - 1:i + 1], linestyle="-",
+                        color=color, solid_capstyle="round")
+            for virtual, color in ((False, CONTEST_COLOR), (True, VIRTUAL_COLOR)):
+                xs = [w for w, p in zip(when, points) if p.virtual == virtual]
+                ys = [p.perf for p in points if p.virtual == virtual]
+                if xs:
+                    ax.plot(xs, ys, linestyle="none", color=color, zorder=3, **marker_style)
+
+            # gc.plot_rating_bg: rank bands plus background-colored x gridlines.
+            ymin, ymax = ax.get_ylim()
+            bgcolor = ax.get_facecolor()
+            for low, high, _, color in GRAPH_BANDS:
+                ax.axhspan(low, high, facecolor=color, alpha=0.8, edgecolor=bgcolor,
+                           linewidth=0.5)
+            for loc in ax.get_xticks():
+                ax.axvline(loc, color=bgcolor, linewidth=0.5)
+            ax.set_ylim(ymin, ymax)
+            fig.autofmt_xdate()
+
+            handles = []
+            if any(not p.virtual for p in points):
+                handles.append(Line2D([], [], color=CONTEST_COLOR, **marker_style))
+            if any(p.virtual for p in points):
+                handles.append(Line2D([], [], color=VIRTUAL_COLOR, **marker_style))
+            ax.legend(handles, labels, bbox_to_anchor=(0, 1, 1, 0), loc="lower left",
+                      mode="expand", ncol=2)
+
+            buffer = io.BytesIO()
+            fig.savefig(buffer, format="png", facecolor=ax.get_facecolor(),
+                        bbox_inches="tight", pad_inches=0.25)
+            return buffer.getvalue()
+        finally:
+            plt.close(fig)

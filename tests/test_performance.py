@@ -309,24 +309,39 @@ def setup_graph(monkeypatch):
     return rated_calls
 
 
-def test_perfgraph_filters_dates_before_computing(cache, monkeypatch):
+def test_perfgraph_filters_dates_and_connects_participations(cache, monkeypatch):
     rated_calls = setup_graph(monkeypatch)
     result = module.perfgraph("alice", cache, "both", "2023", "2024")
     assert rated_calls == [2, 3]
-    names = [trace.name for trace in result.figure.data]
-    assert names == ["Alice (1600)", "Alice virtual"]
-    assert list(result.figure.data[0].y) == [1502.0]
-    assert "1 rank-1 finish" in result.note
+    # One chronological series; the rank-1 finish sits at max(3000, best + 200).
+    assert [(p.perf, p.virtual) for p in result.points] == [
+        (1502.0, False), (1700.0, True), (3000.0, False),
+    ]
+    assert result.labels == ["Alice (1600)", "Alice (virtual)"]
+    assert "Infinite performances (rank 1): 1" in result.note
+    assert "plot" not in result.note.split("\n")[0].lower()
     assert "estimates" in result.note
-    assert "2023-01-01 to 2024-01-01" in result.figure.layout.title.text
+    assert result.png.startswith(b"\x89PNG")
+
+
+def test_infinite_points_sit_above_the_best_finite_performance():
+    points = [
+        module.GraphPoint(1, 3100.0, False),
+        module.GraphPoint(2, math.inf, True),
+    ]
+    assert [p.perf for p in module.plotted_points(points)] == [3100.0, 3300.0]
+    only_infinite = [module.GraphPoint(1, math.inf, False)]
+    assert [p.perf for p in module.plotted_points(only_infinite)] == [3000.0]
 
 
 def test_perfgraph_include_choices(cache, monkeypatch):
     setup_graph(monkeypatch)
     rated = module.perfgraph("alice", cache, "rated")
-    assert [t.name for t in rated.figure.data] == ["Alice (1600)"]
+    assert rated.labels == ["Alice (1600)"]
+    assert not any(p.virtual for p in rated.points)
     virtual = module.perfgraph("alice", cache, "virtual")
-    assert [t.name for t in virtual.figure.data] == ["Alice virtual"]
+    assert virtual.labels == ["Alice (virtual)"]
+    assert [p.perf for p in virtual.points] == [1700.0]
     with pytest.raises(ValueError, match="no virtual contest performances"):
         module.perfgraph("alice", cache, "virtual", "2025")
     with pytest.raises(ValueError, match="earlier"):
