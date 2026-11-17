@@ -6,6 +6,16 @@ A small Python Discord bot for interactions with the Codeforces API.
 
 - `/probrat [contest_id]`: Estimate problem ratings using published pre-contest ratings or cached rating history, including before rating changes are released.
 - `/solvetimes [contest_id] [problem_id]`: Plot solve times by rating for a specified problem.
+- `/perf [handle] [contest-id]`: Show a user's performance in one contest, for the rated participation and any virtual runs.
+- `/perfgraph [handle] (include) (from) (to)`: Plot a user's contest performances over time. `include` is `Rated + virtual` (default), `Rated only` or `Virtual only`. `from` (inclusive) and `to` (exclusive) take `yyyy`, `mmyyyy` or `ddmmyyyy` (separators such as `15-05-2023` also work), so `from:2023 to:2024` plots 2023.
+
+### Performance
+
+Performance uses [carrot](https://github.com/meooow25/carrot)'s method: the pre-contest rating at which the user's rating change, including the contest-wide adjustment, would be zero. Everyone else keeps their real pre-contest rating. A rank-1 finish has infinite performance; `/perfgraph` leaves those points out and says how many. Accounts that started under Codeforces' 2020 newcomer system have their hidden ratings restored (shown rating + 1400/900/550/300/150/50 over their first six contests) once the rating cache is complete.
+
+Virtual performances are **estimates**. Codeforces no longer returns virtual rows from `contest.standings`, so the bot rebuilds a virtual score from the user's submissions. For ICPC rules, it infers the penalty per wrong attempt from the official standings. For CF rules, it fits each problem's point decay to the official standings. The score is then placed among the rated field. Anonymous standings can hide some rated contestants (for example untrusted Div. 3 participants), so a score that falls between visible rows is placed halfway between their official ranks.
+
+Performances need each contestant's rank. The cache now stores ranks, and after this update the background updater refetches older contests once to fill them in (`Rank backfill: ...` in the logs, roughly as long as the initial download). Until that finishes, commands fetch missing contests on demand at about 2 s each. `/perfgraph` limits itself to 60 such requests per run and tells you to run it again if contests are still pending. Finished results are memoized in the cache, so repeat graphs are fast.
 
 `/fetchuser rating` finds an exact rating match or the closest cached user, randomly
 choosing among ties. It verifies up to five candidates against their current

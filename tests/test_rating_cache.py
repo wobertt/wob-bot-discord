@@ -239,3 +239,75 @@ def test_updater_skips_inaccessible_and_reports_ready(cache, monkeypatch, caplog
         assert "Could not cache" not in caplog.text
     with caplog.at_level(logging.INFO):
         asyncio.run(run())
+
+
+def test_old_schema_is_migrated_and_queued_for_rank_backfill(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.sqlite3"
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE contest (id INTEGER PRIMARY KEY, start_time INTEGER NOT NULL,
+            end_time INTEGER NOT NULL, phase TEXT NOT NULL, last_checked REAL,
+            status TEXT NOT NULL DEFAULT 'pending', retry_after REAL NOT NULL DEFAULT 0);
+        CREATE TABLE rating_change (contest_id INTEGER NOT NULL, handle TEXT NOT NULL,
+            rating_update_time INTEGER NOT NULL, old_rating INTEGER NOT NULL,
+            new_rating INTEGER NOT NULL, PRIMARY KEY (contest_id, handle));
+        INSERT INTO contest VALUES (1, 100, 110, 'FINISHED', 50, 'available', 0);
+        INSERT INTO contest VALUES (2, 200, 210, 'FINISHED', 50, 'unavailable', 0);
+        INSERT INTO rating_change VALUES (1, 'a', 110, 1000, 1200);
+    """)
+    conn.commit()
+    conn.close()
+
+    cache = RatingCache(path)
+    assert not cache.contest_has_ranks(1)
+    assert cache.next_rank_backfill(now=0) == 1
+    assert cache.rank_backfill_remaining() == 1
+    frame = changes(("A", 1000, 1200, 110)).assign(rank=[1])
+    cache.store_rating_changes(1, frame, now=0)
+    assert cache.contest_has_ranks(1, "A")
+    assert cache.next_rank_backfill(now=10**12) is None
+    assert cache.contest_field(1)["rank"].tolist() == [1]
+    # Reopening an already-migrated cache is a no-op.
+    assert RatingCache(path).contest_has_ranks(1)
+
+
+def test_refetch_without_rank_keeps_stored_rank_and_clears_perf_memo(cache):
+    cache.store_contests([contest(1)])
+    cache.store_rating_changes(1, changes(("a", 1000, 1200, 110)).assign(rank=[3]))
+    cache.store_rated_perf(1, "a", 1234.0)
+    cache.store_rating_changes(1, changes(("a", 1000, 1250, 110)))
+    assert cache.contest_field(1)["rank"].tolist() == [3]
+    assert cache.get_rated_perf(1, "a") is None
+
+
+def test_updater_backfills_ranks_when_idle(cache, monkeypatch):
+    cache.store_contests([contest(1)])
+    cache.store_rating_changes(1, changes(("a", 1000, 1200, 110)), now=0)
+    with cache.connection() as conn:
+        conn.execute("UPDATE contest SET ranks_stored=0, retry_after=0")
+
+    async def run():
+        updater = RatingCacheUpdater(cache)
+        monkeypatch.setattr(cf_api, "get_contests", lambda **kwargs: [contest(1)])
+        monkeypatch.setattr(
+            cf_api,
+            "get_rating_changes",
+            lambda contest_id, **kwargs: changes(("a", 1000, 1200, 110)).assign(rank=[1]),
+        )
+        task = asyncio.create_task(updater.run())
+        try:
+            async with asyncio.timeout(3):
+                while not cache.contest_has_ranks(1):
+                    await asyncio.sleep(0.01)
+        finally:
+            updater.stop()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        assert cache.rank_backfill_remaining() == 0
+
+    asyncio.run(run())

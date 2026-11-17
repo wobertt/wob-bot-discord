@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 import discord
 from discord import app_commands
@@ -12,6 +13,7 @@ from discord.ext import commands
 from .fetchuser import fetchuser
 from .problemratings import problemratings
 from .cf_api.cf_api import CodeforcesApiError
+from .performance import perf, perfgraph
 from .plotting import send_plotly_figure
 from .rating_cache import RatingCache
 from .solve_info import solvetimes, solvechance
@@ -34,6 +36,80 @@ def register_commands(bot: commands.Bot, rating_cache: RatingCache) -> None:
         except Exception:
             logger.exception("Failed to fetch a user for rating=%s.", rating)
             await interaction.followup.send("Failed to find a Codeforces user. Please try again later.")
+
+    @bot.tree.command(
+        name="perf",
+        description="Show a user's performance in a contest (rated or virtual).",
+    )
+    @app_commands.rename(contest_id="contest-id")
+    @app_commands.describe(handle="Codeforces handle.", contest_id="Contest ID.")
+    async def perf_command(
+        interaction: discord.Interaction, handle: str, contest_id: int
+    ) -> None:
+        await interaction.response.defer(thinking=True)
+        try:
+            embed = await asyncio.to_thread(perf, handle, contest_id, rating_cache)
+            await interaction.followup.send(embed=embed)
+        except (CodeforcesApiError, ValueError) as exc:
+            await interaction.followup.send(str(exc))
+        except Exception:
+            logger.exception(
+                "Failed to calculate performance for handle=%s contest_id=%s.",
+                handle,
+                contest_id,
+            )
+            await interaction.followup.send(
+                f"Failed to calculate performance for {handle} in contest {contest_id}."
+            )
+
+    @bot.tree.command(
+        name="perfgraph",
+        description="Plot a user's contest performances over time.",
+    )
+    @app_commands.rename(date_from="from", date_to="to")
+    @app_commands.describe(
+        handle="Codeforces handle.",
+        include="Which participations to plot (default: both).",
+        date_from="Start date, inclusive: yyyy, mmyyyy or ddmmyyyy.",
+        date_to="End date, exclusive: yyyy, mmyyyy or ddmmyyyy.",
+    )
+    @app_commands.choices(
+        include=[
+            app_commands.Choice(name="Rated + virtual", value="both"),
+            app_commands.Choice(name="Rated only", value="rated"),
+            app_commands.Choice(name="Virtual only", value="virtual"),
+        ]
+    )
+    async def perfgraph_command(
+        interaction: discord.Interaction,
+        handle: str,
+        include: app_commands.Choice[str] | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> None:
+        await interaction.response.defer(thinking=True)
+        try:
+            result = await asyncio.to_thread(
+                perfgraph,
+                handle,
+                rating_cache,
+                include.value if include else "both",
+                date_from,
+                date_to,
+            )
+            await send_plotly_figure(
+                interaction,
+                result.figure,
+                filename=f"perfgraph-{re.sub(r'[^A-Za-z0-9_.-]', '_', handle)}.png",
+                content=result.note or None,
+            )
+        except (CodeforcesApiError, ValueError) as exc:
+            await interaction.followup.send(str(exc))
+        except Exception:
+            logger.exception("Failed to plot performance for handle=%s.", handle)
+            await interaction.followup.send(
+                f"Failed to plot performance for {handle}. Please try again later."
+            )
 
     @bot.tree.command(
         name="probrat",

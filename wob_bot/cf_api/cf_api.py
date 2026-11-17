@@ -62,7 +62,11 @@ def make_request(api_endpoint: str, *, cancel_event: threading.Event | None = No
             response = requests.get(
                 f"https://codeforces.com/api/{api_endpoint}", timeout=(5, 30)
             )
-        except (requests.Timeout, requests.ConnectionError) as exc:
+        except (
+            requests.Timeout,
+            requests.ConnectionError,
+            requests.exceptions.ChunkedEncodingError,
+        ) as exc:
             if attempt < 2:
                 continue
             raise CodeforcesApiError(
@@ -89,7 +93,11 @@ def make_request(api_endpoint: str, *, cancel_event: threading.Event | None = No
             or "limit exceeded" in comment.lower()
         ) and attempt < 2:
             continue
-        if api_endpoint.startswith("user.info?") and "not found" in comment.lower() and response.status_code < 500:
+        if (
+            api_endpoint.startswith(("user.info?", "user.rating?", "user.status?"))
+            and "not found" in comment.lower()
+            and response.status_code < 500
+        ):
             raise UserNotFoundError(comment)
         if (
             api_endpoint.startswith("contest.")
@@ -295,3 +303,29 @@ def get_user_info(handle: str) -> dict:
     if not isinstance(users, list) or len(users) != 1 or not isinstance(users[0], dict):
         raise CodeforcesApiError("Codeforces returned an invalid user profile.")
     return users[0]
+
+
+def get_user_rating(handle: str) -> list[dict]:
+    """Rated contest history, oldest first (contestId, contestName, rank, ...)."""
+    history = make_request("user.rating?" + urlencode({"handle": handle}))
+    if not isinstance(history, list):
+        raise CodeforcesApiError("Codeforces returned an invalid rating history.")
+    return history
+
+
+def get_contest_status(contest_id: int, handle: str) -> list[dict]:
+    """One user's submissions in one contest (all participation types)."""
+    submissions = make_request(
+        "contest.status?" + urlencode({"contestId": contest_id, "handle": handle})
+    )
+    if not isinstance(submissions, list):
+        raise CodeforcesApiError("Codeforces returned an invalid submission list.")
+    return submissions
+
+
+def get_user_status(handle: str) -> list[dict]:
+    """All submissions of a user, newest first."""
+    submissions = make_request("user.status?" + urlencode({"handle": handle}))
+    if not isinstance(submissions, list):
+        raise CodeforcesApiError("Codeforces returned an invalid submission list.")
+    return submissions

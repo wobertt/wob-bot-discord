@@ -28,8 +28,12 @@ async def send_plotly_figure(
     interaction: discord.Interaction,
     fig: go.Figure,
     filename: str,
+    content: str | None = None,
 ) -> None:
     """Render a Plotly figure off the event loop and send it as a Discord file."""
     png_bytes = await asyncio.to_thread(figure_to_png_bytes, fig)
     file = discord.File(io.BytesIO(png_bytes), filename=filename)
-    await interaction.followup.send(file=file)
+    if content:
+        await interaction.followup.send(content=content, file=file)
+    else:
+        await interaction.followup.send(file=file)

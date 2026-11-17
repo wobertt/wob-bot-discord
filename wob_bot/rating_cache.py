@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 REFRESH_INTERVAL = 10 * 60
 RECENT_WINDOW = 7 * 24 * 60 * 60
 UNAVAILABLE_RETRY_INTERVAL = 24 * 60 * 60
+# Codeforces' newcomer system: hidden rating 1400, shown rating boosted over 6 contests.
+NEW_RATING_SYSTEM_CONTEST = 1360
+NEWCOMER_OFFSETS = (1400, 900, 550, 300, 150, 50)
 
 
 @dataclass(frozen=True)
@@ -68,7 +71,33 @@ class RatingCache:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS rated_perf (
+                    contest_id INTEGER NOT NULL,
+                    handle TEXT NOT NULL,
+                    perf REAL NOT NULL,
+                    PRIMARY KEY (contest_id, handle)
+                );
+                CREATE TABLE IF NOT EXISTS virtual_perf (
+                    handle TEXT NOT NULL,
+                    contest_id INTEGER NOT NULL,
+                    start_time INTEGER NOT NULL,
+                    contest_name TEXT NOT NULL,
+                    rank INTEGER,
+                    points REAL,
+                    penalty INTEGER,
+                    perf REAL,
+                    skip_reason TEXT,
+                    PRIMARY KEY (handle, contest_id, start_time)
+                );
             """)
+            # Columns added after the first release; ALTER keeps existing caches.
+            for table, column, definition in (
+                ("rating_change", "rank", "INTEGER"),
+                ("contest", "ranks_stored", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+                if column not in columns:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
@@ -158,13 +187,16 @@ class RatingCache:
         self, contest_id: int, changes: pd.DataFrame, *, now: float | None = None
     ) -> None:
         now = time.time() if now is None else now
+        has_rank = "rank" in changes.columns
         with self.connection() as conn:
             # Keep members missing from a partial re-fetch; replace corrected values.
             conn.executemany(
-                """INSERT INTO rating_change VALUES (?, ?, ?, ?, ?)
+                """INSERT INTO rating_change(contest_id, handle, rating_update_time,
+                       old_rating, new_rating, rank) VALUES (?, ?, ?, ?, ?, ?)
                    ON CONFLICT(contest_id, handle) DO UPDATE SET
                        rating_update_time=excluded.rating_update_time,
-                       old_rating=excluded.old_rating, new_rating=excluded.new_rating""",
+                       old_rating=excluded.old_rating, new_rating=excluded.new_rating,
+                       rank=coalesce(excluded.rank, rating_change.rank)""",
                 (
                     (
                         contest_id,
@@ -172,10 +204,15 @@ class RatingCache:
                         int(row.ratingUpdateTimeSeconds),
                         int(row.oldRating),
                         int(row.newRating),
+                        int(row.rank) if has_rank and pd.notna(row.rank) else None,
                     )
                     for row in changes.itertuples(index=False)
                 ),
             )
+            # Any download by this version counts as rank-aware, so the rank
+            # backfill only revisits contests stored before ranks were kept.
+            conn.execute("UPDATE contest SET ranks_stored=1 WHERE id=?", (contest_id,))
+            conn.execute("DELETE FROM rated_perf WHERE contest_id=?", (contest_id,))
             # Recompute affected handles to handle corrected timestamps and
             # out-of-order contest refreshes without regressing current ratings.
             conn.executemany(
@@ -271,6 +308,154 @@ class RatingCache:
                     ratings[handle] = row[0]
             return HistoricalRatings(ratings, catalog_loaded and missing is None)
 
+    def next_rank_backfill(self, *, now: float | None = None) -> int | None:
+        """Oldest downloaded contest whose rows predate the rank column."""
+        now = time.time() if now is None else now
+        with self.connection() as conn:
+            row = conn.execute(
+                """SELECT id FROM contest WHERE status='available' AND ranks_stored=0
+                   AND retry_after <= ? ORDER BY start_time, id LIMIT 1""",
+                (now,),
+            ).fetchone()
+            return row[0] if row else None
+
+    def rank_backfill_remaining(self) -> int:
+        with self.connection() as conn:
+            return conn.execute(
+                "SELECT count(*) FROM contest WHERE status='available' AND ranks_stored=0"
+            ).fetchone()[0]
+
+    def contest_has_ranks(self, contest_id: int, handle: str | None = None) -> bool:
+        """Whether cached rows are complete enough to rank this contest's field."""
+        with self.connection() as conn:
+            total, missing = conn.execute(
+                """SELECT count(*), count(*) - count(rank) FROM rating_change
+                   WHERE contest_id=?""",
+                (contest_id,),
+            ).fetchone()
+            if total == 0 or missing:
+                return False
+            if handle is None:
+                return True
+            return (
+                conn.execute(
+                    "SELECT 1 FROM rating_change WHERE contest_id=? AND handle=?",
+                    (contest_id, handle.casefold()),
+                ).fetchone()
+                is not None
+            )
+
+    def contest_field(self, contest_id: int) -> pd.DataFrame:
+        """Rated field with CF ranks and effective pre-contest ratings.
+
+        Newcomers since the 2020 rating system (contest 1360) start with a
+        shown rating of 0 and have a hidden rating of shown + NEWCOMER_OFFSETS[k]
+        before their k-th rated contest. A first contest that is not shown as 0
+        means an established account, which gets no offset (first_contest is
+        reported as 0 for those).
+        That needs complete earlier history; otherwise fall back to carrot's
+        rule that a shown 0 means 1400.
+        """
+        with self.connection() as conn:
+            conn.execute("BEGIN")
+            start = conn.execute(
+                "SELECT start_time FROM contest WHERE id=?", (contest_id,)
+            ).fetchone()
+            fix = contest_id >= NEW_RATING_SYSTEM_CONTEST and start is not None
+            if fix:
+                catalog = conn.execute(
+                    "SELECT 1 FROM cache_state WHERE key='catalog_updated_at'"
+                ).fetchone()
+                missing = conn.execute(
+                    """SELECT 1 FROM contest WHERE phase='FINISHED' AND start_time < ?
+                       AND last_checked IS NULL LIMIT 1""",
+                    (start[0],),
+                ).fetchone()
+                fix = catalog is not None and missing is None
+            if fix:
+                rows = conn.execute(
+                    """SELECT rc.handle, rc.rank, rc.old_rating,
+                           (SELECT count(*) FROM (
+                               SELECT 1 FROM rating_change p WHERE p.handle=rc.handle
+                               AND p.rating_update_time < rc.rating_update_time LIMIT 6)),
+                           (SELECT f.contest_id * (f.old_rating = 0) FROM rating_change f
+                               WHERE f.handle=rc.handle
+                               ORDER BY f.rating_update_time, f.contest_id LIMIT 1)
+                       FROM rating_change rc WHERE rc.contest_id=?""",
+                    (contest_id,),
+                ).fetchall()
+            else:
+                rows = [
+                    (*row, None, None)
+                    for row in conn.execute(
+                        """SELECT handle, rank, old_rating FROM rating_change
+                           WHERE contest_id=?""",
+                        (contest_id,),
+                    )
+                ]
+        field = pd.DataFrame(
+            rows, columns=["handle", "rank", "old_rating", "prior", "first_contest"]
+        )
+        effective = field.old_rating.copy()
+        if contest_id >= NEW_RATING_SYSTEM_CONTEST:
+            effective[field.old_rating == 0] = NEWCOMER_OFFSETS[0]
+        if fix and not field.empty:
+            newcomer = (field.first_contest >= NEW_RATING_SYSTEM_CONTEST) & (
+                field.prior < len(NEWCOMER_OFFSETS)
+            )
+            offsets = field.prior[newcomer].astype(int).map(
+                lambda k: NEWCOMER_OFFSETS[k]
+            )
+            effective[newcomer] = field.old_rating[newcomer] + offsets
+        field["effective_rating"] = effective.astype(int)
+        return field[["handle", "rank", "old_rating", "effective_rating"]]
+
+    def rating_before(self, handle: str, timestamp: int) -> int | None:
+        return self.ratings_before([handle], timestamp).ratings.get(handle.casefold())
+
+    def get_rated_perf(self, contest_id: int, handle: str) -> float | None:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT perf FROM rated_perf WHERE contest_id=? AND handle=?",
+                (contest_id, handle.casefold()),
+            ).fetchone()
+            return row[0] if row else None
+
+    def store_rated_perf(self, contest_id: int, handle: str, perf: float) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO rated_perf VALUES (?, ?, ?)",
+                (contest_id, handle.casefold(), perf),
+            )
+
+    def get_virtual_perfs(self, handle: str) -> dict[tuple[int, int], dict]:
+        with self.connection() as conn:
+            conn.row_factory = sqlite3.Row
+            return {
+                (row["contest_id"], row["start_time"]): dict(row)
+                for row in conn.execute(
+                    "SELECT * FROM virtual_perf WHERE handle=?", (handle.casefold(),)
+                )
+            }
+
+    def store_virtual_perf(self, handle: str, record: dict) -> None:
+        with self.connection() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO virtual_perf VALUES
+                   (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    handle.casefold(),
+                    record["contest_id"],
+                    record["start_time"],
+                    record["contest_name"],
+                    record.get("rank"),
+                    record.get("points"),
+                    record.get("penalty"),
+                    record.get("perf"),
+                    record.get("skip_reason"),
+                ),
+            )
+
     def progress(self) -> tuple[int, int]:
         with self.connection() as conn:
             checked, total = conn.execute(
@@ -309,6 +494,11 @@ class RatingCacheUpdater:
                     logger.info("Rating cache ready: all %s contests checked; inaccessible contests skipped.", total)
                 ready_reported = ready
                 contest_id = await asyncio.to_thread(self.cache.next_contest)
+                backfill = False
+                if contest_id is None:
+                    # Idle work: refetch contests cached before ranks were stored.
+                    contest_id = await asyncio.to_thread(self.cache.next_rank_backfill)
+                    backfill = contest_id is not None
                 if contest_id is None:
                     await asyncio.sleep(60)
                     continue
@@ -333,6 +523,16 @@ class RatingCacheUpdater:
                 await asyncio.to_thread(
                     self.cache.store_rating_changes, contest_id, changes
                 )
+                if backfill:
+                    remaining = await asyncio.to_thread(
+                        self.cache.rank_backfill_remaining
+                    )
+                    logger.info(
+                        "Rank backfill: contest %s stored; %s contests remaining.",
+                        contest_id,
+                        remaining,
+                    )
+                    continue
                 checked, total = await asyncio.to_thread(self.cache.progress)
                 logger.info(
                     "Rating cache: %s/%s contests checked; contest %s returned %s changes.",
