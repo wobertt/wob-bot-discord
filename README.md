@@ -33,8 +33,8 @@ contest refreshes maintain it automatically. No extra rated-user download is nee
 Create a virtual environment, install dependencies, and add your server ID to `.env`:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
