@@ -2,6 +2,7 @@
 Commands for interacting with the Codeforces API.
 """
 
+from contextlib import contextmanager, nullcontext
 import threading
 import time
 from urllib.parse import urlencode
@@ -33,6 +34,12 @@ class RequestCancelled(Exception):
 _request_lock = threading.Lock()
 _next_request_at = 0.0
 _REQUEST_INTERVAL = 2.0
+# Updater requests wait until no command request has run for _FOREGROUND_GRACE s.
+_FOREGROUND_GRACE = 5.0
+_BACKGROUND_POLL = 0.25
+_foreground_lock = threading.Lock()
+_foreground_active = 0
+_foreground_idle_at = 0.0
 _RATING_CHANGE_COLUMNS = [
     "handle",
     "rank",
@@ -40,24 +47,81 @@ _RATING_CHANGE_COLUMNS = [
     "oldRating",
     "newRating",
 ]
+_PARTICIPANT_COLUMNS = [
+    "handle",
+    "participantType",
+    "rank",
+    "points",
+    "penalty",
+    "successfulHackCount",
+    "unsuccessfulHackCount",
+]
 
 
-def _wait_for_request_slot(cancel_event: threading.Event | None) -> None:
+@contextmanager
+def _foreground_request():
+    global _foreground_active, _foreground_idle_at
+    with _foreground_lock:
+        _foreground_active += 1
+    try:
+        yield
+    finally:
+        with _foreground_lock:
+            _foreground_active -= 1
+            _foreground_idle_at = time.monotonic()
+
+
+def _wait_for_request_slot(
+    cancel_event: threading.Event | None, *, background: bool = False
+) -> None:
     global _next_request_at
-    with _request_lock:
-        delay = max(0.0, _next_request_at - time.monotonic())
+    if not background:
+        with _request_lock:
+            delay = max(0.0, _next_request_at - time.monotonic())
+            if cancel_event is not None:
+                if cancel_event.wait(delay):
+                    raise RequestCancelled
+            else:
+                time.sleep(delay)
+            _next_request_at = time.monotonic() + _REQUEST_INTERVAL
+        return
+    # Sleep outside the lock so command requests never queue behind this one.
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RequestCancelled
+        with _request_lock:
+            now = time.monotonic()
+            with _foreground_lock:
+                busy = _foreground_active > 0
+                ready_at = max(_next_request_at, _foreground_idle_at + _FOREGROUND_GRACE)
+            if not busy and now >= ready_at:
+                _next_request_at = now + _REQUEST_INTERVAL
+                return
+            delay = _BACKGROUND_POLL if busy else ready_at - now
         if cancel_event is not None:
             if cancel_event.wait(delay):
                 raise RequestCancelled
         else:
             time.sleep(delay)
-        _next_request_at = time.monotonic() + _REQUEST_INTERVAL
 
 
-def make_request(api_endpoint: str, *, cancel_event: threading.Event | None = None):
-    """Make a bounded, globally rate-limited request from any bot thread."""
+def make_request(
+    api_endpoint: str,
+    *,
+    cancel_event: threading.Event | None = None,
+    background: bool = False,
+):
+    """Make a bounded, globally rate-limited request from any bot thread.
+    ``background`` requests yield to command requests."""
+    with nullcontext() if background else _foreground_request():
+        return _make_request(api_endpoint, cancel_event, background)
+
+
+def _make_request(
+    api_endpoint: str, cancel_event: threading.Event | None, background: bool
+):
     for attempt in range(3):
-        _wait_for_request_slot(cancel_event)
+        _wait_for_request_slot(cancel_event, background=background)
         try:
             response = requests.get(
                 f"https://codeforces.com/api/{api_endpoint}", timeout=(5, 30)
@@ -115,8 +179,12 @@ def make_request(api_endpoint: str, *, cancel_event: threading.Event | None = No
     raise AssertionError("Unreachable")
 
 
-def get_contests(*, cancel_event: threading.Event | None = None) -> list[dict]:
-    return make_request("contest.list", cancel_event=cancel_event)
+def get_contests(
+    *, cancel_event: threading.Event | None = None, background: bool = False
+) -> list[dict]:
+    return make_request(
+        "contest.list", cancel_event=cancel_event, background=background
+    )
 
 
 def get_contest_standings(
@@ -180,51 +248,30 @@ def get_contest_standings(
     [97566 rows x 5 columns]
     """
 
-    def parse_standings_row(row: dict) -> tuple[dict, pd.DataFrame]:
-        """Parse one row of the 'rows' section in /api/contest.standings."""
-        if len(row["party"]["members"]) != 1:
-            raise ValueError(
-                "Only contests with individual participants are supported."
-            )
-        handle = row["party"]["members"][0]["handle"]
-
-        participant_info = {
-            "handle": handle,
-            "participantType": row["party"].get("participantType", "CONTESTANT"),
-        } | {
-            key: row[key]
-            for key in (
-                "rank",
-                "points",
-                "penalty",
-                "successfulHackCount",
-                "unsuccessfulHackCount",
-            )
-        }
-        problem_results = pd.DataFrame(
-            {"handle": handle} | res for res in row["problemResults"]
-        )
-        return participant_info, problem_results
-
     json = make_request(f"contest.standings?contestId={contest_id}")
 
     contest = json["contest"]
     problems = pd.DataFrame(json["problems"]).rename(columns={"index": "label"})
 
-    standings = tuple(parse_standings_row(row) for row in json["rows"])
-    participants = pd.DataFrame(
-        (p_info for p_info, _ in standings),
-        columns=[
-            "handle",
-            "participantType",
-            "rank",
-            "points",
-            "penalty",
-            "successfulHackCount",
-            "unsuccessfulHackCount",
-        ],
-    )
-    if not standings:
+    # Build each frame once; a frame per row took seconds on large contests.
+    participant_rows, result_rows = [], []
+    for row in json["rows"]:
+        party = row["party"]
+        if len(party["members"]) != 1:
+            raise ValueError(
+                "Only contests with individual participants are supported."
+            )
+        handle = party["members"][0]["handle"]
+        participant_rows.append(
+            (handle, party.get("participantType", "CONTESTANT"))
+            + tuple(row[key] for key in _PARTICIPANT_COLUMNS[2:])
+        )
+        result_rows.extend(
+            {"problem_index": index, "handle": handle} | result
+            for index, result in enumerate(row["problemResults"])
+        )
+    participants = pd.DataFrame(participant_rows, columns=_PARTICIPANT_COLUMNS)
+    if not result_rows:
         return (
             contest,
             problems,
@@ -238,18 +285,18 @@ def get_contest_standings(
                 ]
             ),
         )
-    problem_results = pd.concat(results for _, results in standings)
+    problem_results = pd.DataFrame(result_rows)
     if "bestSubmissionTimeSeconds" not in problem_results:
         problem_results["bestSubmissionTimeSeconds"] = float("nan")
-
-    # Some fixups.
-    problem_results = problem_results.reset_index(names="problem_index")
 
     return contest, problems, participants, problem_results
 
 
 def get_rating_changes(
-    contest_id: int, *, cancel_event: threading.Event | None = None
+    contest_id: int,
+    *,
+    cancel_event: threading.Event | None = None,
+    background: bool = False,
 ) -> pd.DataFrame:
     """
     Example:
@@ -272,7 +319,9 @@ def get_rating_changes(
     """
     try:
         changes = make_request(
-            f"contest.ratingChanges?contestId={contest_id}", cancel_event=cancel_event
+            f"contest.ratingChanges?contestId={contest_id}",
+            cancel_event=cancel_event,
+            background=background,
         )
     except RatingChangesUnavailableError:
         changes = []

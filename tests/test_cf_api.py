@@ -191,6 +191,64 @@ def test_stopped_background_request_is_not_sent():
     stopped.set()
     with pytest.raises(cf_api.RequestCancelled):
         real_wait_for_slot(stopped)
+    with pytest.raises(cf_api.RequestCancelled):
+        real_wait_for_slot(stopped, background=True)
+
+
+def fake_clock(monkeypatch, on_sleep=lambda: None):
+    now = [100.0]
+
+    def sleep(delay):
+        now[0] += delay
+        on_sleep()
+
+    monkeypatch.setattr(cf_api.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(cf_api.time, "sleep", sleep)
+    return now
+
+
+def test_background_requests_wait_for_command_requests(monkeypatch):
+    polls = []
+
+    def command_finishes_after_three_polls():
+        polls.append(now[0])
+        if len(polls) == 3:
+            cf_api._foreground_active = 0
+            cf_api._foreground_idle_at = now[0]
+
+    now = fake_clock(monkeypatch, command_finishes_after_three_polls)
+    monkeypatch.setattr(cf_api, "_next_request_at", 0.0)
+    monkeypatch.setattr(cf_api, "_foreground_active", 1)
+    monkeypatch.setattr(cf_api, "_foreground_idle_at", 0.0)
+    real_wait_for_slot(None, background=True)
+    # Polls while the command request runs, then waits out the grace period.
+    finished = 100.0 + 3 * cf_api._BACKGROUND_POLL
+    assert now[0] == finished + cf_api._FOREGROUND_GRACE
+    assert cf_api._next_request_at == now[0] + cf_api._REQUEST_INTERVAL
+
+
+def test_command_requests_ignore_the_background_grace(monkeypatch):
+    now = fake_clock(monkeypatch)
+    monkeypatch.setattr(cf_api, "_next_request_at", 0.0)
+    monkeypatch.setattr(cf_api, "_foreground_idle_at", 100.0)
+    real_wait_for_slot(None)
+    assert now[0] == 100.0
+
+
+@pytest.mark.parametrize("background", [False, True])
+def test_only_command_requests_hold_off_the_updater(monkeypatch, background):
+    seen = []
+    monkeypatch.setattr(
+        cf_api,
+        "_wait_for_request_slot",
+        lambda _event, **kw: seen.append((cf_api._foreground_active, kw["background"])),
+    )
+    monkeypatch.setattr(
+        cf_api.requests, "get", Mock(return_value=response({"status": "OK", "result": []}))
+    )
+    cf_api.get_contests(background=background)
+    assert seen == [(0 if background else 1, background)]
+    assert cf_api._foreground_active == 0
 
 
 @pytest.mark.parametrize("status", [200, 400, 404])

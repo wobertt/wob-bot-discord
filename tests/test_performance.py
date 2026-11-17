@@ -225,6 +225,20 @@ def test_newcomer_offsets_apply_with_complete_history(cache):
     assert field.to_dict() == {"new": 400 + 900, "old": 1490, "fresh": 1400}
 
 
+def test_newcomer_offsets_stop_after_six_contests(cache):
+    # 'vet' started at shown 0 in contest 1400 and gains 100 per contest.
+    columns = ["handle", "rank", "ratingUpdateTimeSeconds", "oldRating", "newRating"]
+    cache.store_contests([contest(1400 + i, 100 * (i + 1)) for i in range(7)])
+    for i in range(7):
+        cache.store_rating_changes(1400 + i, pd.DataFrame(
+            [("vet", 1, 100 * (i + 1) + 10, 100 * i, 100 * (i + 1))], columns=columns))
+    effective = {
+        contest_id: cache.contest_field(contest_id).effective_rating.item()
+        for contest_id in (1401, 1405, 1406)
+    }
+    assert effective == {1401: 100 + 900, 1405: 500 + 50, 1406: 600}
+
+
 def test_newcomer_offsets_fall_back_without_complete_history(cache):
     cache.store_contests([contest(1400, 100), contest(1401, 200)])
     columns = ["handle", "rank", "ratingUpdateTimeSeconds", "oldRating", "newRating"]

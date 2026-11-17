@@ -373,15 +373,21 @@ class RatingCache:
                 ).fetchone()
                 fix = catalog is not None and missing is None
             if fix:
+                # Look up the first contest only where an offset can still apply.
                 rows = conn.execute(
-                    """SELECT rc.handle, rc.rank, rc.old_rating,
-                           (SELECT count(*) FROM (
-                               SELECT 1 FROM rating_change p WHERE p.handle=rc.handle
-                               AND p.rating_update_time < rc.rating_update_time LIMIT 6)),
-                           (SELECT f.contest_id * (f.old_rating = 0) FROM rating_change f
-                               WHERE f.handle=rc.handle
-                               ORDER BY f.rating_update_time, f.contest_id LIMIT 1)
-                       FROM rating_change rc WHERE rc.contest_id=?""",
+                    f"""WITH field AS MATERIALIZED (
+                           SELECT rc.handle, rc.rank, rc.old_rating,
+                               (SELECT count(*) FROM (
+                                   SELECT 1 FROM rating_change p WHERE p.handle=rc.handle
+                                   AND p.rating_update_time < rc.rating_update_time
+                                   LIMIT {len(NEWCOMER_OFFSETS)})) AS prior
+                           FROM rating_change rc WHERE rc.contest_id=?)
+                       SELECT handle, rank, old_rating, prior,
+                           CASE WHEN prior < {len(NEWCOMER_OFFSETS)} THEN (
+                               SELECT f.contest_id * (f.old_rating = 0) FROM rating_change f
+                               WHERE f.handle=field.handle
+                               ORDER BY f.rating_update_time, f.contest_id LIMIT 1) END
+                       FROM field""",
                     (contest_id,),
                 ).fetchall()
             else:
@@ -481,7 +487,9 @@ class RatingCacheUpdater:
                 await asyncio.to_thread(self.cache.initialize_current_ratings)
                 if time.monotonic() >= next_catalog_refresh:
                     contests = await asyncio.to_thread(
-                        cf_api.get_contests, cancel_event=self.cancel_event
+                        cf_api.get_contests,
+                        cancel_event=self.cancel_event,
+                        background=True,
                     )
                     if self.cancel_event.is_set():
                         return
@@ -507,6 +515,7 @@ class RatingCacheUpdater:
                         cf_api.get_rating_changes,
                         contest_id,
                         cancel_event=self.cancel_event,
+                        background=True,
                     )
                 except cf_api.ContestNotFoundError:
                     if self.cancel_event.is_set():

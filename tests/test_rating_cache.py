@@ -115,12 +115,17 @@ def test_concurrent_connections_can_read_and_write(cache):
 def test_updater_automatically_populates_and_resumes(cache, monkeypatch):
     async def run():
         updater = RatingCacheUpdater(cache)
-        monkeypatch.setattr(
-            cf_api, "get_contests", lambda **kwargs: [contest(1), contest(2, 200)]
-        )
+        background = []
+
+        def contests(**kwargs):
+            background.append(kwargs["background"])
+            return [contest(1), contest(2, 200)]
+
+        monkeypatch.setattr(cf_api, "get_contests", contests)
         fetched = []
 
         def fetch(contest_id, **kwargs):
+            background.append(kwargs["background"])
             fetched.append(contest_id)
             return changes(("a", 1000, 1200, 110))
 
@@ -139,6 +144,8 @@ def test_updater_automatically_populates_and_resumes(cache, monkeypatch):
                 pass
         assert fetched == [1, 2]
         assert RatingCache(cache.path).next_contest() is None
+        # The updater only uses request slots that commands leave idle.
+        assert background and all(background)
 
     asyncio.run(run())
 

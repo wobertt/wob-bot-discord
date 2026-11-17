@@ -161,21 +161,32 @@ def _history_complete(cache: RatingCache) -> bool:
     return total > 0 and checked == total
 
 
-def _ensure_ranks(
+def _has_ranks(field: pd.DataFrame, handle: str | None = None) -> bool:
+    """Same test as RatingCache.contest_has_ranks, on an already loaded field."""
+    if field.empty or field["rank"].isna().any():
+        return False
+    return handle is None or bool((field.handle == handle.casefold()).any())
+
+
+def _ranked_field(
     contest_id: int, handle: str | None, cache: RatingCache, budget: FetchBudget
-) -> None:
-    if cache.contest_has_ranks(contest_id, handle):
-        return
+) -> pd.DataFrame:
+    """The contest's cached rated field, downloaded once if ranks are missing."""
+    field = cache.contest_field(contest_id)
+    if _has_ranks(field, handle):
+        return field
     budget.spend()
     try:
         changes = cf_api.get_rating_changes(contest_id)
     except cf_api.ContestNotFoundError as exc:
         raise PerfUnavailable("contest is not public") from exc
     cache.store_rating_changes(contest_id, changes)
-    if not cache.contest_has_ranks(contest_id):
+    field = cache.contest_field(contest_id)
+    if not _has_ranks(field):
         raise PerfUnavailable("rating changes are not published")
-    if handle is not None and not cache.contest_has_ranks(contest_id, handle):
+    if not _has_ranks(field, handle):
         raise PerfUnavailable("user has no rating change in this contest")
+    return field
 
 
 def rated_perf(
@@ -186,8 +197,7 @@ def rated_perf(
     cached = cache.get_rated_perf(contest_id, handle)
     if cached is not None:
         return cached
-    _ensure_ranks(contest_id, handle, cache, budget)
-    contest_field = cache.contest_field(contest_id)
+    contest_field = _ranked_field(contest_id, handle, cache, budget)
     calculator = RatingCalculator(
         -contest_field["rank"].to_numpy(), np.zeros(len(contest_field)),
         contest_field.effective_rating.to_numpy(),
@@ -236,9 +246,10 @@ def _icpc_penalty_per_wrong(participants: pd.DataFrame, results: pd.DataFrame) -
     solved = results[results.points > 0]
     if solved.empty or "rejectedAttemptCount" not in solved:
         return 10
-    per_row = solved.groupby("handle").agg(
-        minutes=("bestSubmissionTimeSeconds", lambda s: (s // 60).sum()),
-        rejected=("rejectedAttemptCount", "sum"),
+    per_row = (
+        solved.assign(minutes=solved.bestSubmissionTimeSeconds // 60)
+        .groupby("handle")
+        .agg(minutes=("minutes", "sum"), rejected=("rejectedAttemptCount", "sum"))
     )
     per_row = per_row.join(participants.set_index("handle").penalty, how="inner")
     per_row = per_row[per_row.rejected > 0]
@@ -356,11 +367,10 @@ def _load_standings(
     if contest.get("phase") != "FINISHED":
         raise PerfUnavailable("contest has not finished")
     cache.record_contest(contest)
-    _ensure_ranks(contest_id, None, cache, budget)
     # The rated field comes from rating changes. Anonymous standings can hide
     # rated rows (e.g. untrusted Div. 3 participants), so visible rows are only
     # used to place a virtual score in official-rank order.
-    rated_field = cache.contest_field(contest_id)
+    rated_field = _ranked_field(contest_id, None, cache, budget)
     ranks = rated_field.set_index("handle")["rank"]
     official = participants[participants.participantType == "CONTESTANT"].copy()
     official["handle_key"] = official.handle.astype(str).str.casefold()
